@@ -18,6 +18,13 @@ app.get('/weather', getWeather);
 app.get('/yelp', getYelps);
 app.get('/movies', getMovies); 
 
+const timeouts = {
+  weather: 15000,
+  yelp: 15000,
+  movies: 15000,
+  events: 15000,
+};
+
 
 function convertTime(timeInMilliseconds) {
   return new Date(timeInMilliseconds).toString().slice(0, 15);
@@ -41,9 +48,17 @@ Location.prototype.save = function(){
 }
 
 function Weather(weatherData) {
-  this.location_id = weatherData.location_id;
+  this.created_at = Date.now();
   this.forecast = weatherData.summary;
   this.time = convertTime(weatherData.time * 1000);
+}
+
+Weather.prototype.save = function(location_id){
+  const SQL = `INSERT INTO weather (forecast, time, created_at, location_id) VALUES($1, $2, $3, $4)`;
+
+  const VALUES = [this.forecast, this.time, this.created_at, location_id];
+
+  client.query(SQL, VALUES);
 }
 
 function Event(query, url, name, date, summary) {
@@ -56,6 +71,12 @@ function Event(query, url, name, date, summary) {
 
 function handleError(error, response) {
   response.status(error.status || 500).send(error.message);
+}
+
+function deleteData(tableName, location_id){
+  const SQL = `DELETE FROM ${tableName} WHERE location_id=$1;`;
+  const VALUES = [location_id];
+  return client.query(SQL, VALUES);
 }
 
 function lookupData(lookupHandler){
@@ -98,7 +119,37 @@ function getLocation(req, res){
 }
 
 function getWeather(req, res){
+ lookupData({
+   tableName: 'weather',
+   column: 'location_id',
+   query: req.query.data.id,
 
+   cacheHit: function(result){
+    let ageOfResults = (Date.now() - result.rows[0].created_at);
+    if(ageOfResults > timeouts.weather){
+      deleteData('weather', req.query.data.id).then(() =>{
+         this.cacheMiss();
+      })
+     
+    } else {
+      res.send(result.rows);
+    }
+   },
+
+   cacheMiss: function(){
+    const url = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${req.query.data.latitude},${req.query.data.longitude}`
+
+    superagent.get(url)
+      .then(weatherData => {
+        const weatherSummaries = weatherData.body.daily.data.map(day => {
+          const summary = new Weather(day);
+          summary.save(req.query.data.id);
+          return summary
+        });
+        res.send(weatherSummaries);
+      })
+   }
+ })
 }
 
 function getEvents(req, res){
