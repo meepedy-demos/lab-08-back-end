@@ -12,15 +12,32 @@ client.connect();
 const app = express();
 app.use(cors());
 
+app.get('/location', getLocation);
+app.get('/events', getEvents);
+app.get('/weather', getWeather);
+app.get('/yelp', getYelps);
+app.get('/movies', getMovies); 
+
+
 function convertTime(timeInMilliseconds) {
-  return new Date(timeInMilliseconds).toString().split(' ').slice(0, 4).join(' ');
+  return new Date(timeInMilliseconds).toString().slice(0, 15);
 }
 
-function Location(query, formatted, lat, long) {
+function Location(query,geoData) {
   this.search_query = query;
-  this.formatted_query = formatted;
-  this.latitude = lat;
-  this.longitude = long;
+  this.formatted_query = geoData.results[0].formatted_address;
+  this.latitude = geoData.results[0].geometry.location.lat;
+  this.longitude = geoData.results[0].geometry.location.lng;
+}
+
+Location.prototype.save = function(){
+  const SQL = `INSERT INTO locations (search_query, formatted_query, latitude, longitude) VALUES($1, $2, $3, $4) ON CONFLICT DO NOTHING RETURNING id;`;
+  const VALUES = [this.search_query, this.formatted_query, this.latitude, this.longitude];
+
+  return client.query(SQL, VALUES).then(result => {
+    this.id = result.rows[0].id;
+    return this;
+  })
 }
 
 function Weather(weatherData) {
@@ -41,89 +58,62 @@ function handleError(error, response) {
   response.status(error.status || 500).send(error.message);
 }
 
-function select(table, column, value){
-  const SQL = `SELECT * FROM ${table} WHERE ${column}=$1`;
-  const VALUES = [value];
-  console.log(value);
-  return client.query(SQL, VALUES);
+function lookupData(lookupHandler){
+  const SQL = `SELECT * FROM ${lookupHandler.tableName} WHERE ${lookupHandler.column}=$1`
+  const VALUES = [lookupHandler.query]
+
+  client.query(SQL, VALUES).then(result => {
+    if(result.rowCount === 0){
+      lookupHandler.cacheMiss();
+    } else {
+      lookupHandler.cacheHit(result);
+    }
+  })
 }
 
-app.get('/location', (request, response) => {
-  select('locations', 'search_query', request.query.data).then(results => {
-    if (results.rows.length === 0) {
-      superagent
-        .get(`https://maps.googleapis.com/maps/api/geocode/json?address=${request.query.data}&key=${process.env.GEOCODE_API_KEY}`)
-        .then((locationData) => {
-          const location = new Location(request.query.data, locationData.body.results[0].formatted_address, locationData.body.results[0].geometry.location.lat, locationData.body.results[0].geometry.location.lng);
-          const query = 'INSERT INTO locations (search_query, formatted_query, latitude, longitude) VALUES ($1, $2, $3, $4)';
-          const values = Object.values(location);
-          client.query(query, values).catch((...args) => console.log(args));
-          response.send(location);
+
+function getLocation(req, res){
+  lookupData({
+    tableName: 'locations',
+    column: 'search_query',
+    query: req.query.data,
+
+    cacheHit: function (result) {
+      console.log('from db')
+      res.send(result.rows[0]);
+    },
+
+    cacheMiss: function(){
+      console.log('from api');
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${this.query}&key=${process.env.GEOCODE_API_KEY}`;
+
+      superagent.get(url)
+        .then(geoData => {
+          const location = new Location(this.query, geoData.body);
+          location.save().then(location => res.send(location));
         })
-        .catch((error) => handleError(error, response));
-    } else {
-      response.send(results.rows[0]);
-      
     }
-  }).catch(error => console.log(error));
-});
 
-app.get('/events', (request, response) => {
+  })
+}
 
-  select('events', 'search_query', request.query.data.search_query).then(results => {
-    if (results.rows.length === 0) {
-      superagent
-        .get(`https://www.eventbriteapi.com/v3/events/search/?token=${process.env.EVENTBRITE_API_KEY}&location.address=${request.query.data.search_query}&location.within=10km`)
-        .then((eventData) => {
-          const sliceIndex = eventData.body.events.length > 20 ? 20 : eventData.body.events.length;
-          const events = eventData.body.events.slice(0, sliceIndex).map((event) => new Event(request.query.data.search_query, event.url, event.name.text, event.start.local, event.description.text));
-          events.forEach((event) => {
-            const query = 'INSERT INTO events (search_query, link, name, event_date, summary) VALUES ($1, $2, $3, $4, $5)';
-            client.query(query, Object.values(event));
-          });
-          console.log('API');
-          response.send(events);
-        })
-        .catch((error) => handleError(error, response));
-    } 
-    else {
-      response.send(results.rows[0]);
-      console.log('DB');
-    }
-  }).catch(error => console.log(error));
-});
+function getWeather(req, res){
 
-app.get('/weather', (request, response) => {
-  select('weather', 'location_id', request.query.data.location_id).then(results => {
-    if (results.rows.length === 0) {
-      superagent
-        .get(`https://api.darksky.net/forecast/${process.env.DARKSKY_API_KEY}/${request.query.data.latitude},${request.query.data.longitude}`)
-        .then((weatherData) => {
-          console.log('API');
-          const weather = weatherData.body.daily.data.map((day) => {
-            day.location_id = request.query.data.location_id;
-            return new Weather(day);
-          });
-          weather.forEach((day) => {
-            const query = 'INSERT INTO weather (location_id, forecast, time) VALUES ($1, $2, $3)';
-            client.query(query, Object.values(day));
-          });
-          response.send(weather);
-        })
-        .catch((error) => handleError(error, response));
-    }
-    else {
-      response.send(results.rows[0]);
-      console.log('DB');
-    }
-  }).catch(error => console.log(error));
-});
+}
 
-app.get(/.*/, (req, res) => {
-  res.status(404).send({ status: 404, responseText: 'This item could not be found..' });
-});
+function getEvents(req, res){
+
+}
+
+function getYelps(req, res){
+
+}
+
+function getMovies(req, res){
+
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log('I know that you came to party baby, baby, baby, baby');
+  console.log(`Server is listening on ${PORT}`);
 });
